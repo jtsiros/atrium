@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.bitshiftxr.atrium",
+  "name": "Atrium",
+  "version": "0.1.0",
+  "author": "Jon Tsiros",
+  "license": "MIT",
+  "description": "Control your Home Assistant devices from the Omarchy bar.",
+  "kinds": [
+    "service",
+    "bar-widget",
+    "overlay"
+  ],
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "Panel.qml",
+    "overlay": "Settings.qml"
+  },
+  "barWidget": {
+    "displayName": "Atrium",
+    "description": "Lights, thermostats, media players, covers, fans and locks, grouped by area.",
+    "category": "Home",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

@@ -1,0 +1,28 @@
+#!/bin/bash
+# `omarchy plugin add` only clones files, so this builds the daemon.
+
+set -euo pipefail
+
+root=$(cd "$(dirname "$0")" && pwd)
+
+if ! command -v cargo >/dev/null 2>&1; then
+  omarchy pkg add rust
+fi
+
+# The shell watches the plugins directory with `inotifywait -r` and rescans on
+# every file event, so a build inside it reloads the shell thousands of times.
+# Everything is written to the cache; only the finished binary lands here.
+target="${XDG_CACHE_HOME:-$HOME/.cache}/atrium/target"
+
+cargo build --release --manifest-path "$root/daemon/Cargo.toml" --target-dir "$target"
+
+mkdir -p "$root/bin"
+install -m 755 "$target/release/atriumd" "$root/bin/atriumd"
+
+echo "Atrium is built."
+echo
+echo "Next: open the panel and paste your Home Assistant URL and a long-lived"
+echo "access token (Home Assistant -> your profile -> Security)."
+echo
+echo "When the panel opens, your rooms appear immediately as configured in your"
+echo "Home Assistant dashboard."
