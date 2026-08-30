@@ -1,3 +1,4 @@
 target/
 bin/atriumd
 config.json
+.op/
