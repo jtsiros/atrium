@@ -95,87 +95,93 @@ fn is_active(domain: &str, state: &str) -> bool {
     }
 }
 
+/// Which bits of `supported_features` a domain advertises, as controls.
+fn from_features(bits: u64, pairs: &[(u64, Control)]) -> Vec<Control> {
+    pairs
+        .iter()
+        .filter(|(flag, _)| has(bits, *flag))
+        .map(|(_, control)| *control)
+        .collect()
+}
+
+fn light_controls(entity: &Value) -> Vec<Control> {
+    let modes: Vec<&str> = attr(entity, "supported_color_modes")
+        .and_then(Value::as_array)
+        .map(|m| m.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+
+    let mut controls = vec![Control::Toggle];
+    // Every mode except onoff carries a brightness channel.
+    if modes.iter().any(|m| *m != "onoff") {
+        controls.push(Control::Brightness);
+    }
+    if modes.contains(&"color_temp") {
+        controls.push(Control::ColorTemp);
+    }
+    if modes.iter().any(|m| matches!(*m, "hs" | "rgb" | "rgbw" | "rgbww" | "xy")) {
+        controls.push(Control::Color);
+    }
+    controls
+}
+
+fn cover_controls(bits: u64) -> Vec<Control> {
+    use features::cover::*;
+    let mut controls = Vec::new();
+    if has(bits, OPEN) || has(bits, CLOSE) {
+        controls.push(Control::OpenClose);
+    }
+    controls.extend(from_features(bits, &[
+        (STOP, Control::Stop),
+        (SET_POSITION, Control::Position),
+    ]));
+    controls
+}
+
+fn media_controls(bits: u64) -> Vec<Control> {
+    use features::media_player::*;
+    let mut controls = Vec::new();
+    if has(bits, PLAY) || has(bits, PAUSE) || has(bits, NEXT) || has(bits, PREVIOUS) {
+        controls.push(Control::Transport);
+    }
+    if has(bits, VOLUME_SET) || has(bits, VOLUME_MUTE) {
+        controls.push(Control::Volume);
+    }
+    controls
+}
+
+fn climate_controls(bits: u64) -> Vec<Control> {
+    use features::climate::*;
+    let mut controls = vec![Control::HvacMode];
+    controls.extend(from_features(bits, &[
+        (TARGET_TEMPERATURE, Control::Temperature),
+        (TARGET_TEMPERATURE_RANGE, Control::TemperatureRange),
+        (FAN_MODE, Control::FanMode),
+        (PRESET_MODE, Control::PresetMode),
+    ]));
+    controls
+}
+
 pub fn capabilities(entity: &Value) -> Vec<Control> {
     let Some(entity_id) = entity.get("entity_id").and_then(Value::as_str) else {
         return vec![Control::ReadOnly];
     };
-    let domain = domain_of(entity_id);
     let bits = attr_u64(entity, "supported_features");
-    let mut controls = Vec::new();
 
-    match domain {
-        "light" => {
-            controls.push(Control::Toggle);
-            let modes: Vec<&str> = attr(entity, "supported_color_modes")
-                .and_then(Value::as_array)
-                .map(|m| m.iter().filter_map(Value::as_str).collect())
-                .unwrap_or_default();
-            if modes.iter().any(|m| *m != "onoff") {
-                controls.push(Control::Brightness);
-            }
-            if modes.contains(&"color_temp") {
-                controls.push(Control::ColorTemp);
-            }
-            if modes
-                .iter()
-                .any(|m| matches!(*m, "hs" | "rgb" | "rgbw" | "rgbww" | "xy"))
-            {
-                controls.push(Control::Color);
-            }
-        }
-        "switch" | "input_boolean" | "humidifier" | "siren" | "remote" => {
-            controls.push(Control::Toggle)
-        }
+    let mut controls = match domain_of(entity_id) {
+        "light" => light_controls(entity),
+        "switch" | "input_boolean" | "humidifier" | "siren" | "remote" => vec![Control::Toggle],
         "fan" => {
-            controls.push(Control::Toggle);
-            if has(bits, features::fan::SET_SPEED) {
-                controls.push(Control::FanSpeed);
-            }
+            let mut c = vec![Control::Toggle];
+            c.extend(from_features(bits, &[(features::fan::SET_SPEED, Control::FanSpeed)]));
+            c
         }
-        "lock" => controls.push(Control::Lock),
-        "scene" | "script" | "button" | "input_button" => controls.push(Control::Activate),
-        "cover" => {
-            if has(bits, features::cover::OPEN) || has(bits, features::cover::CLOSE) {
-                controls.push(Control::OpenClose);
-            }
-            if has(bits, features::cover::STOP) {
-                controls.push(Control::Stop);
-            }
-            if has(bits, features::cover::SET_POSITION) {
-                controls.push(Control::Position);
-            }
-        }
-        "media_player" => {
-            if has(bits, features::media_player::PLAY)
-                || has(bits, features::media_player::PAUSE)
-                || has(bits, features::media_player::NEXT)
-                || has(bits, features::media_player::PREVIOUS)
-            {
-                controls.push(Control::Transport);
-            }
-            if has(bits, features::media_player::VOLUME_SET)
-                || has(bits, features::media_player::VOLUME_MUTE)
-            {
-                controls.push(Control::Volume);
-            }
-        }
-        "climate" => {
-            controls.push(Control::HvacMode);
-            if has(bits, features::climate::TARGET_TEMPERATURE) {
-                controls.push(Control::Temperature);
-            }
-            if has(bits, features::climate::TARGET_TEMPERATURE_RANGE) {
-                controls.push(Control::TemperatureRange);
-            }
-            if has(bits, features::climate::FAN_MODE) {
-                controls.push(Control::FanMode);
-            }
-            if has(bits, features::climate::PRESET_MODE) {
-                controls.push(Control::PresetMode);
-            }
-        }
-        _ => {}
-    }
+        "lock" => vec![Control::Lock],
+        "scene" | "script" | "button" | "input_button" => vec![Control::Activate],
+        "cover" => cover_controls(bits),
+        "media_player" => media_controls(bits),
+        "climate" => climate_controls(bits),
+        _ => Vec::new(),
+    };
 
     if controls.is_empty() {
         controls.push(Control::ReadOnly);
@@ -183,9 +189,6 @@ pub fn capabilities(entity: &Value) -> Vec<Control> {
     controls
 }
 
-// Allow-listed per control: an entity's full attribute bag can carry camera
-// access tokens, signed media URLs and GPS coordinates, and rows reach both the
-// panel and debug output.
 fn needed_attributes(controls: &[Control], entity: &Value) -> serde_json::Map<String, Value> {
     let mut keys: Vec<&str> = vec!["friendly_name", "device_class", "unit_of_measurement"];
     for control in controls {

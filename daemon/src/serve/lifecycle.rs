@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use tokio::sync::mpsc;
 
 use super::{Daemon, Outcome, BACKOFF_MAX, BACKOFF_START, IDLE_LIMIT, IDLE_PING};
@@ -8,39 +10,22 @@ use crate::ha::prefs;
 use crate::keyring;
 use crate::protocol::{Command, ConnectionState, Event};
 
+/// Which way main_loop leaves the current iteration.
+enum Step {
+    Continue,
+    Stop,
+}
+
 impl Daemon {
     pub(super) async fn main_loop(&mut self, mut commands: mpsc::UnboundedReceiver<Command>) {
         let mut backoff = BACKOFF_START;
         self.emit_config();
 
         loop {
-            let endpoint = match url::parse(&self.config.base_url) {
-                Ok(endpoint) => endpoint,
-                Err(_) => {
-                    self.emit_status(ConnectionState::Unconfigured, None);
-                    match self.idle(&mut commands).await {
-                        Outcome::Stop => return,
-                        _ => continue,
-                    }
-                }
-            };
-
-            let token = match keyring::lookup(&endpoint.origin).await {
-                Ok(Some(token)) => token,
-                Ok(None) => {
-                    self.emit_status(ConnectionState::NeedsToken, None);
-                    match self.idle(&mut commands).await {
-                        Outcome::Stop => return,
-                        _ => continue,
-                    }
-                }
-                Err(e) => {
-                    self.emit_status(ConnectionState::Failed, Some(e.to_string()));
-                    match self.idle(&mut commands).await {
-                        Outcome::Stop => return,
-                        _ => continue,
-                    }
-                }
+            let (endpoint, token) = match self.credentials(&mut commands).await {
+                Ok(pair) => pair,
+                Err(Step::Stop) => return,
+                Err(Step::Continue) => continue,
             };
 
             self.generation += 1;
@@ -49,41 +34,88 @@ impl Daemon {
 
             match self.connect_once(&endpoint, &token, &mut commands).await {
                 Outcome::Stop => return,
-                Outcome::Reconfigure => {
-                    backoff = BACKOFF_START;
-                    continue;
-                }
-                Outcome::Lost(e) => {
-                    if !e.is_retryable() {
-                        self.error(format!("{e}. Enter a new token to try again."));
-                        self.emit_status(ConnectionState::Failed, Some(e.to_string()));
-                        // Retrying a rejected token only produces failed logins,
-                        // which Home Assistant answers by banning the address.
-                        // Wait for the credential to actually change.
-                        match self.idle_until_credentials_change(&mut commands).await {
-                            Outcome::Stop => return,
-                            _ => continue,
-                        }
-                    }
-                    self.warn(format!("{e}. Retrying in {}s.", backoff.as_secs()));
-                    self.emit_status(ConnectionState::Reconnecting, Some(e.to_string()));
-                    tokio::select! {
-                        _ = tokio::time::sleep(backoff) => {}
-                        command = commands.recv() => match command {
-                            None => return,
-                            Some(command) => {
-                                if matches!(self.handle_offline(command).await, Outcome::Stop) {
-                                    return;
-                                }
-                                backoff = BACKOFF_START;
-                                continue;
-                            }
-                        }
-                    }
-                    backoff = (backoff * 2).min(BACKOFF_MAX);
-                }
+                Outcome::Reconfigure => backoff = BACKOFF_START,
+                Outcome::Lost(e) => match self.recover(e, &mut backoff, &mut commands).await {
+                    Step::Stop => return,
+                    Step::Continue => {}
+                },
             }
         }
+    }
+
+    /// The address and token to connect with, or which way the caller should
+    /// leave this iteration while one of them is missing.
+    async fn credentials(
+        &mut self,
+        commands: &mut mpsc::UnboundedReceiver<Command>,
+    ) -> Result<(Endpoint, String), Step> {
+        let endpoint = match url::parse(&self.config.base_url) {
+            Ok(endpoint) => endpoint,
+            Err(_) => {
+                self.emit_status(ConnectionState::Unconfigured, None);
+                return Err(self.wait_for_settings(commands).await);
+            }
+        };
+
+        let token = match keyring::lookup(&endpoint.origin).await {
+            Ok(Some(token)) => token,
+            Ok(None) => {
+                self.emit_status(ConnectionState::NeedsToken, None);
+                return Err(self.wait_for_settings(commands).await);
+            }
+            Err(e) => {
+                self.emit_status(ConnectionState::Failed, Some(e.to_string()));
+                return Err(self.wait_for_settings(commands).await);
+            }
+        };
+
+        Ok((endpoint, token))
+    }
+
+    async fn wait_for_settings(&mut self, commands: &mut mpsc::UnboundedReceiver<Command>) -> Step {
+        match self.idle(commands).await {
+            Outcome::Stop => Step::Stop,
+            _ => Step::Continue,
+        }
+    }
+
+    /// What to do about a connection that ended. A rejected token waits for a
+    /// new one; anything else backs off, staying responsive to settings changes
+    /// while it waits.
+    async fn recover(
+        &mut self,
+        error: ClientError,
+        backoff: &mut Duration,
+        commands: &mut mpsc::UnboundedReceiver<Command>,
+    ) -> Step {
+        if !error.is_retryable() {
+            self.error(format!("{error}. Enter a new token to try again."));
+            self.emit_status(ConnectionState::Failed, Some(error.to_string()));
+            return match self.idle_until_credentials_change(commands).await {
+                Outcome::Stop => Step::Stop,
+                _ => Step::Continue,
+            };
+        }
+
+        self.warn(format!("{error}. Retrying in {}s.", backoff.as_secs()));
+        self.emit_status(ConnectionState::Reconnecting, Some(error.to_string()));
+
+        tokio::select! {
+            _ = tokio::time::sleep(*backoff) => {}
+            command = commands.recv() => return match command {
+                None => Step::Stop,
+                Some(command) => {
+                    if matches!(self.handle_offline(command).await, Outcome::Stop) {
+                        return Step::Stop;
+                    }
+                    *backoff = BACKOFF_START;
+                    Step::Continue
+                }
+            },
+        }
+
+        *backoff = (*backoff * 2).min(BACKOFF_MAX);
+        Step::Continue
     }
 
     async fn idle_until_credentials_change(

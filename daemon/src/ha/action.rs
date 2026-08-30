@@ -41,6 +41,20 @@ fn number(data: &Value, key: &'static str) -> Result<f64, Error> {
         .ok_or(Error::BadArgument(key))
 }
 
+/// A number that must land inside a range. Reading and bounding together keeps
+/// each action arm to one line and makes an unbounded action visible.
+fn bounded(
+    data: &Value,
+    key: &'static str,
+    range: std::ops::RangeInclusive<f64>,
+) -> Result<f64, Error> {
+    let value = number(data, key)?;
+    if !range.contains(&value) {
+        return Err(Error::BadArgument(key));
+    }
+    Ok(value)
+}
+
 fn text(data: &Value, key: &'static str) -> Result<String, Error> {
     data.get(key)
         .and_then(Value::as_str)
@@ -85,10 +99,7 @@ pub fn resolve(entity_id: &str, action: &str, data: &Value) -> Result<ServiceCal
         ("lock", "unlock") => call("lock", "unlock", entity_id, none()),
 
         ("light", "setBrightness") => {
-            let value = number(data, "brightness")?;
-            if !(0.0..=255.0).contains(&value) {
-                return Err(Error::BadArgument("brightness"));
-            }
+            let value = bounded(data, "brightness", 0.0..=255.0)?;
             // Home Assistant rejects brightness 0; the intent is off.
             if value < 1.0 {
                 call("light", "turn_off", entity_id, none())
@@ -97,18 +108,12 @@ pub fn resolve(entity_id: &str, action: &str, data: &Value) -> Result<ServiceCal
             }
         }
         ("light", "setColorTemp") => {
-            let kelvin = number(data, "kelvin")?;
-            if !(1000.0..=10000.0).contains(&kelvin) {
-                return Err(Error::BadArgument("kelvin"));
-            }
+            let kelvin = bounded(data, "kelvin", 1000.0..=10000.0)?;
             call("light", "turn_on", entity_id, json!({ "color_temp_kelvin": kelvin.round() as u64 }))
         }
         ("light", "setColor") => {
-            let hue = number(data, "hue")?;
-            let saturation = number(data, "saturation")?;
-            if !(0.0..=360.0).contains(&hue) || !(0.0..=100.0).contains(&saturation) {
-                return Err(Error::BadArgument("hue/saturation"));
-            }
+            let hue = bounded(data, "hue", 0.0..=360.0)?;
+            let saturation = bounded(data, "saturation", 0.0..=100.0)?;
             call("light", "turn_on", entity_id, json!({ "hs_color": [hue, saturation] }))
         }
 
@@ -116,10 +121,7 @@ pub fn resolve(entity_id: &str, action: &str, data: &Value) -> Result<ServiceCal
         ("cover", "close") => call("cover", "close_cover", entity_id, none()),
         ("cover", "stop") => call("cover", "stop_cover", entity_id, none()),
         ("cover", "setPosition") => {
-            let position = number(data, "position")?;
-            if !(0.0..=100.0).contains(&position) {
-                return Err(Error::BadArgument("position"));
-            }
+            let position = bounded(data, "position", 0.0..=100.0)?;
             call("cover", "set_cover_position", entity_id, json!({ "position": position.round() as u64 }))
         }
 
@@ -127,10 +129,7 @@ pub fn resolve(entity_id: &str, action: &str, data: &Value) -> Result<ServiceCal
         ("media_player", "next") => call("media_player", "media_next_track", entity_id, none()),
         ("media_player", "previous") => call("media_player", "media_previous_track", entity_id, none()),
         ("media_player", "setVolume") => {
-            let level = number(data, "level")?;
-            if !(0.0..=1.0).contains(&level) {
-                return Err(Error::BadArgument("level"));
-            }
+            let level = bounded(data, "level", 0.0..=1.0)?;
             call("media_player", "volume_set", entity_id, json!({ "volume_level": level }))
         }
         ("media_player", "setMuted") => {
@@ -139,10 +138,7 @@ pub fn resolve(entity_id: &str, action: &str, data: &Value) -> Result<ServiceCal
         }
 
         ("fan", "setSpeed") => {
-            let percentage = number(data, "percentage")?;
-            if !(0.0..=100.0).contains(&percentage) {
-                return Err(Error::BadArgument("percentage"));
-            }
+            let percentage = bounded(data, "percentage", 0.0..=100.0)?;
             call("fan", "set_percentage", entity_id, json!({ "percentage": percentage.round() as u64 }))
         }
 
@@ -150,19 +146,13 @@ pub fn resolve(entity_id: &str, action: &str, data: &Value) -> Result<ServiceCal
             call("climate", "set_hvac_mode", entity_id, json!({ "hvac_mode": text(data, "mode")? }))
         }
         ("climate", "setTemperature") => {
-            let temperature = number(data, "temperature")?;
-            if !TEMPERATURE_RANGE.contains(&temperature) {
-                return Err(Error::BadArgument("temperature"));
-            }
+            let temperature = bounded(data, "temperature", TEMPERATURE_RANGE)?;
             call("climate", "set_temperature", entity_id, json!({ "temperature": temperature }))
         }
         ("climate", "setTemperatureRange") => {
-            let low = number(data, "low")?;
-            let high = number(data, "high")?;
-            if low > high
-                || !TEMPERATURE_RANGE.contains(&low)
-                || !TEMPERATURE_RANGE.contains(&high)
-            {
+            let low = bounded(data, "low", TEMPERATURE_RANGE)?;
+            let high = bounded(data, "high", TEMPERATURE_RANGE)?;
+            if low > high {
                 return Err(Error::BadArgument("low/high"));
             }
             call("climate", "set_temperature", entity_id, json!({ "target_temp_low": low, "target_temp_high": high }))
