@@ -1,0 +1,45 @@
+#!/bin/bash
+
+# Drives Service.qml against a daemon that is not there, one that spawns and
+# dies, the real one, and one that appears partway through the run. Needs a
+# Wayland session; each case waits out the timers in DaemonFailureTest.qml, so
+# the whole run takes about a minute and a half.
+
+set -uo pipefail
+
+root=$(cd "$(dirname "$0")" && pwd)
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+printf '#!/bin/sh\nexit 1\n' >"$work/dies-on-startup"
+chmod +x "$work/dies-on-startup"
+
+[[ -x $root/bin/atriumd ]] || {
+  echo "test-daemon-failure: build the daemon first: $root/setup" >&2
+  exit 1
+}
+
+status=0
+run() {
+  local name=$1 expect=$2 daemon=$3
+  echo "== $name"
+  rm -f "$work/config.json"
+  ATRIUM_TEST_EXPECT="$expect" \
+    ATRIUM_CONFIG="$work/config.json" \
+    ATRIUM_DAEMON="$daemon" \
+    timeout 60 qs -p "$root/DaemonFailureTest.qml" 2>&1 |
+    grep -oE "(  (pass|FAIL)  |RESULT (pass|FAIL)).*"
+  local result=${PIPESTATUS[0]}
+  (( result == 0 )) || status=1
+}
+
+run "missing binary"   failure  "$work/not-a-binary"
+run "dies on startup"  failure  "$work/dies-on-startup"
+run "working daemon"   ok       "$root/bin/atriumd"
+
+rm -f "$work/appears-late"
+( sleep 12; cp "$root/bin/atriumd" "$work/appears-late" ) &
+run "recovers"         recovery "$work/appears-late"
+wait
+
+exit "$status"

@@ -113,6 +113,7 @@ Item {
         wrapMode: Text.WordWrap
         text: {
           if (!root.service) return "Starting"
+          if (root.service.daemonFailed) return root.service.daemonFailureText
           if (root.connected) {
             return "Connected · Home Assistant " + root.service.haVersion
               + " · " + root.service.areas.length + " areas"

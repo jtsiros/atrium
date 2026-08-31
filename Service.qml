@@ -120,6 +120,9 @@ QtObject {
   readonly property bool connected: connectionState === "connected"
   readonly property bool needsSetup: connectionState === "unconfigured"
     || connectionState === "needsToken"
+  readonly property bool daemonFailed: bridge.failed
+  readonly property string daemonFailureText:
+    "atriumd is not running — run setup in the Atrium plugin folder to build it."
 
   readonly property string daemonPath: {
     var override = Quickshell.env("ATRIUM_DAEMON")
@@ -396,6 +399,22 @@ QtObject {
   property Bridge bridge: Bridge {
     daemonPath: root.daemonPath
     onEvent: function(payload) { root.handle(payload) }
+  }
+
+  // Unlike a daemon-reported problem, this one does not resolve on its own, so
+  // it outlives problemTimer rather than clearing twelve seconds later.
+  property Connections daemonFailure: Connections {
+    target: root.bridge
+    function onFailedChanged() {
+      if (root.bridge.failed) {
+        problemTimer.stop()
+        root.problem = root.daemonFailureText
+        root.problemLevel = "error"
+      } else if (root.problem === root.daemonFailureText) {
+        root.problem = ""
+        root.problemLevel = ""
+      }
+    }
   }
 
   property IpcHandler ipc: IpcHandler {

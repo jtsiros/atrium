@@ -292,7 +292,8 @@ Panel {
           width: Math.max(0, parent.width - root.pad * 2)
         }
 
-        // Only present while something is actually wrong; it clears itself.
+        // Only present while something is actually wrong. Daemon-reported
+        // problems clear themselves; a daemon that never started does not.
         Rectangle {
           x: root.pad
           width: Math.max(0, parent.width - root.pad * 2)
